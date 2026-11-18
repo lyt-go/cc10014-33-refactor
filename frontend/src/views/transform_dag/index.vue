@@ -24,9 +24,36 @@
       <dl><dt>编号</dt><dd>{{ selectedNode.id }}</dd></dl>
       <dl><dt>名称</dt><dd>{{ selectedNode.name || selectedNode.label }}</dd></dl>
       <dl v-for="f in detailFields" :key="f"><dt>{{ f }}</dt><dd>{{ selectedNode[f] ?? '—' }}</dd></dl>
-      <div style="grid-column:1/-1; margin-top:8px; display:flex; gap:6px;">
+      <div style="grid-column:1/-1; margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
         <button v-for="action in actions" :key="action" class="btn" :data-testid="`action-${selectedNode.id}-${action}`" @click="runAction(action, selectedNode)">{{ action }}</button>
+        <button class="btn primary" type="button" data-testid="execute-node" @click="executeNode(selectedNode)">执行节点</button>
+        <button class="btn" type="button" data-testid="view-output" @click="openOutput(selectedNode)">输出数据集</button>
       </div>
+    </div>
+    <div v-if="outputPanel.table" class="dag-detail" data-testid="output-panel">
+      <div style="grid-column:1/-1; display:flex; justify-content:space-between; align-items:center;">
+        <strong>输出数据集：{{ outputPanel.table }}</strong>
+        <button class="btn" type="button" data-testid="close-output" @click="outputPanel.table=''">关闭</button>
+      </div>
+      <dl><dt>状态</dt><dd>{{ outputPanel.status }}</dd></dl>
+      <dl><dt>原字段顺序</dt><dd>{{ outputPanel.fieldOrder.join(' , ') }}</dd></dl>
+      <dl><dt>行数</dt><dd>{{ outputPanel.rows.length }}</dd></dl>
+      <dl><dt>新旧度量对照</dt><dd>{{ outputPanel.comparison.same ? '一致（无差异）' : `差异 ${outputPanel.comparison.diffCount} 项` }}</dd></dl>
+      <div style="grid-column:1/-1;">
+        <table class="data-table">
+          <thead><tr><th v-for="col in outputPanel.sortedColumns" :key="col">{{ col }}</th></tr></thead>
+          <tbody>
+            <tr v-for="(row, idx) in outputPanel.sortedRows" :key="idx">
+              <td v-for="col in outputPanel.sortedColumns" :key="col">{{ row[col] ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="grid-column:1/-1; display:flex; gap:6px;">
+        <button class="btn primary" type="button" data-testid="advance-status" @click="advanceStatus">推进状态（单步）</button>
+        <button class="btn" type="button" data-testid="back-to-list" @click="backToList">返回编排列表</button>
+      </div>
+      <span v-if="outputMessage" class="error-text" style="grid-column:1/-1;">{{ outputMessage }}</span>
     </div>
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate"><h3>登记转换节点</h3>
@@ -78,5 +105,53 @@ async function submitCreate() {
   try { const res = await request(ENDPOINT, { method: 'POST', body: JSON.stringify({ values: createValues.value }) }); if(!res.ok) throw new Error('创建失败'); showCreate.value = false; await reload() } catch(e: any) { errorMessage.value = e.message }
 }
 function exportRows() { window.open(`${ENDPOINT}/export`, '_blank') }
+
+// ---- 转换节点执行与输出数据集（状态单向推进、字段顺序对照） ----
+const outputPanel = reactive<{table: string; status: string; fieldOrder: string[]; rows: any[]; sortedRows: any[]; sortedColumns: string[]; comparison: any}>({
+  table: '', status: '', fieldOrder: [], rows: [], sortedRows: [], sortedColumns: [], comparison: { same: true, diffCount: 0 },
+})
+const outputMessage = ref('')
+async function executeNode(node: any) {
+  outputMessage.value = ''
+  try {
+    const res = await request(`${ENDPOINT}/${node.id}/execute`, { method: 'POST' })
+    const payload = await res.json()
+    if (!res.ok || !payload.ok) throw new Error(payload.message || '节点执行失败')
+    await reload()
+    await openOutput(node)
+  } catch (e: any) { outputMessage.value = e.message }
+}
+async function openOutput(node: any) {
+  outputMessage.value = ''
+  const table = node['输出表名']
+  try {
+    const res = await request(`${ENDPOINT}/outputs/${encodeURIComponent(table)}`)
+    if (!res.ok) throw new Error('输出数据集尚未生成，请先执行节点')
+    const view = await res.json()
+    outputPanel.table = table
+    outputPanel.status = view.status
+    outputPanel.fieldOrder = view.field_order ?? []
+    outputPanel.rows = view.rows ?? []
+    outputPanel.sortedRows = view.sorted_rows ?? []
+    outputPanel.sortedColumns = outputPanel.sortedRows.length ? Object.keys(outputPanel.sortedRows[0]) : outputPanel.fieldOrder
+    outputPanel.comparison = view.measure_comparison ?? { same: true, diffCount: 0 }
+  } catch (e: any) { outputMessage.value = e.message }
+}
+async function advanceStatus() {
+  outputMessage.value = ''
+  try {
+    const res = await request(`${ENDPOINT}/outputs/${encodeURIComponent(outputPanel.table)}/advance`, { method: 'POST' })
+    const payload = await res.json()
+    if (!res.ok || !payload.ok) throw new Error(payload.message || '状态推进失败')
+    const node = selectedNode.value
+    if (node) await openOutput(node)
+  } catch (e: any) { outputMessage.value = e.message }
+}
+function backToList() {
+  // 从输出数据集页面返回转换编排列表：关闭面板并重新核对节点结果
+  outputPanel.table = ''
+  selectedNode.value = null
+  void reload()
+}
 onMounted(reload)
 </script>

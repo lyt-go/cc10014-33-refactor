@@ -29,6 +29,8 @@ class Store:
         self._archive_records: list[dict[str, Any]] = []
         # 补数区间记录
         self._backfill_partitions: dict[str, list[dict[str, Any]]] = {}
+        # 转换节点输出数据集登记: "输出表名" -> {status, runs: [...], ...}
+        self._transform_outputs: dict[str, dict[str, Any]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -128,6 +130,47 @@ class Store:
 
     def get_lineage_edges(self) -> list[dict[str, Any]]:
         return list(self._lineage_edges)
+
+    # ---- 转换节点输出数据集登记（状态单向推进） ----
+
+    def save_transform_output(self, output_table: str, run_record: dict[str, Any]) -> dict[str, Any]:
+        """登记一次转换输出运行。
+
+        首次生成时数据集状态为「已生成」，重复执行只追加运行记录并更新度量快照，
+        不回退状态（状态机的向前推进由 transform_pipeline.advance_output_status 负责）。
+        """
+        existing = self._transform_outputs.get(output_table)
+        now = datetime.now().isoformat()
+        if existing is None:
+            run_record = dict(run_record)
+            run_record["run_id"] = 1
+            self._transform_outputs[output_table] = {
+                "output_table": output_table,
+                "status": "已生成",
+                "runs": [run_record],
+                "latest_run_id": 1,
+                "created_at": now,
+                "updated_at": now,
+            }
+            return self._transform_outputs[output_table]
+        run_record = dict(run_record)
+        run_record["run_id"] = len(existing["runs"]) + 1
+        existing["runs"].append(run_record)
+        existing["latest_run_id"] = run_record["run_id"]
+        existing["updated_at"] = now
+        return existing
+
+    def get_transform_output(self, output_table: str) -> dict[str, Any] | None:
+        return self._transform_outputs.get(output_table)
+
+    def list_transform_outputs(self) -> list[dict[str, Any]]:
+        return list(self._transform_outputs.values())
+
+    def latest_transform_run(self, output_table: str) -> dict[str, Any] | None:
+        dataset = self._transform_outputs.get(output_table)
+        if not dataset or not dataset.get("runs"):
+            return None
+        return dataset["runs"][-1]
 
     # ---- 质量稽核结果 ----
 

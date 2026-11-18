@@ -74,3 +74,35 @@ def execute_node(entry_id: int) -> dict[str, Any]:
     """执行转换节点：消费上游表数据，写入下游表，自动生成血缘。"""
     result = service.execute_node(entry_id)
     return result
+
+
+@router.get("/outputs/datasets")
+def list_output_datasets() -> dict[str, Any]:
+    """列出转换节点输出数据集及其单向状态机状态。"""
+    items = service.list_output_datasets()
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/outputs/{output_table}")
+def get_output_dataset(output_table: str) -> dict[str, Any]:
+    """输出数据集页面：原字段顺序数据、排序后字段视图与新旧度量对照。"""
+    view = service.get_output_dataset_view(output_table)
+    if not view.get("ok"):
+        raise HTTPException(status_code=404, detail=view.get("message", "输出数据集不存在"))
+    return view
+
+
+@router.post("/outputs/{output_table}/advance")
+def advance_output_status(output_table: str) -> ActionResult:
+    """输出数据集状态单步推进；跳级或回退会被拒绝。"""
+    entry, message = service.advance_output_status(output_table)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.get("/outputs/{output_table}/conflict")
+def get_output_conflict(output_table: str) -> dict[str, Any]:
+    """比较同一输出数据集上多个转换来源的处理先后与优先级。"""
+    from app.services import transform_pipeline
+    return transform_pipeline.resolve_output_conflict(output_table)

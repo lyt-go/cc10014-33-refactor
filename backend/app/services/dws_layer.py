@@ -1,9 +1,15 @@
-"""汇总层管理业务规则：消费DWD明细数据，按维度聚合生成汇总表，支持版本和血缘。"""
+"""汇总层管理业务规则：消费DWD明细数据，按维度聚合生成汇总表，支持版本和血缘。
+
+重构说明：本模块原先自带一份与转换节点重复的 GROUP BY 聚合实现，现统一收拢到
+``app.services.transform_pipeline`` 共用执行路径；本服务只保留 DWD 取数装配与
+汇总表元数据管理，聚合口径、输出字段与血缘格式不再各写一遍。
+"""
 from __future__ import annotations
 
 from typing import Any
 
 from app.store import store
+from app.services import transform_pipeline as pipeline
 
 MODULE = "dws_layer"
 LIST_FIELDS = ["表编号", "统计粒度", "汇总维度", "度量字段", "聚合函数", "时间范围", "刷新周期", "创建批次"]
@@ -88,48 +94,31 @@ class DwsLayerService:
         dims = [d.strip() for d in entry.get("汇总维度", "").split(",")]
         measure = entry.get("度量字段", "")
         agg_func = entry.get("聚合函数", "SUM")
-        result = self._do_aggregate(dwd_data, dims, measure, agg_func)
+        transform_logic = f"{agg_func}({measure}) GROUP BY {','.join(dims)}"
+        # 聚合加工与血缘落库统一走共用执行路径，口径与转换节点保持一致。
+        result = pipeline.run_aggregation_pipeline(
+            input_table=dwd_table,
+            output_table=entry.get("表名称", f"dws_{entry_id}"),
+            input_data=dwd_data,
+            dims=dims,
+            measure=measure,
+            agg=agg_func,
+            script=transform_logic,
+            field_map=",".join(dims),
+            batch_id=entry.get("创建批次", ""),
+            source_kind=MODULE,
+            source_id=entry_id,
+            source_code=entry.get("表编号", ""),
+            execution_order="",
+        )
+        rows = result["rows"]
         dws_table = entry.get("表名称", f"dws_{entry_id}")
-        store.set_table_rows(dws_table, result)
         store.save_version(MODULE, entry_id, entry)
-        # 注册血缘
-        store.add_lineage(dwd_table, dws_table, ",".join(dims),
-                          transform_logic=f"{agg_func}({measure}) GROUP BY {','.join(dims)}",
-                          batch_id=entry.get("创建批次", ""))
-        return {"ok": True, "message": f"汇总表 {dws_table} 已生成，共{len(result)}行", "rows": result}
+        return {"ok": True, "message": f"汇总表 {dws_table} 已生成，共{len(rows)}行", "rows": rows}
 
     def _do_aggregate(self, data: list[dict[str, Any]], dims: list[str], measure: str, agg: str) -> list[dict[str, Any]]:
-        groups: dict[str, dict[str, Any]] = {}
-        for row in data:
-            key_parts = []
-            for d in dims:
-                key_parts.append(str(row.get(d, "")))
-            key = "|".join(key_parts)
-            if key not in groups:
-                groups[key] = {d: row.get(d) for d in dims}
-                groups[key]["_values"] = []
-            try:
-                groups[key]["_values"].append(float(row.get(measure, 0) or 0))
-            except Exception:
-                groups[key]["_values"].append(0.0)
-        result = []
-        for key, g in groups.items():
-            out = {d: g[d] for d in dims}
-            vals = g["_values"]
-            if agg == "SUM":
-                out[f"{measure}_agg"] = sum(vals)
-            elif agg == "COUNT":
-                out[f"{measure}_agg"] = len(vals)
-            elif agg == "AVG":
-                out[f"{measure}_agg"] = sum(vals) / len(vals) if vals else 0
-            elif agg == "MAX":
-                out[f"{measure}_agg"] = max(vals) if vals else 0
-            elif agg == "MIN":
-                out[f"{measure}_agg"] = min(vals) if vals else 0
-            else:
-                out[f"{measure}_agg"] = sum(vals)
-            result.append(out)
-        return result
+        """兼容外壳：旧调用方仍可使用，内部已收拢到共用聚合逻辑。"""
+        return pipeline.group_aggregate(data, dims, measure, agg)
 
     def get_table_data(self, table_name: str) -> list[dict[str, Any]]:
         return store.table_rows(table_name)
